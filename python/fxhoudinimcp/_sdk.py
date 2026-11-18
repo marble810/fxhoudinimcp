@@ -24,19 +24,13 @@ try:
     # mcp >= 2.0
     from mcp.server.mcpserver import Context as Context
     from mcp.server.mcpserver import MCPServer as Server
-    from mcp.server.mcpserver.exceptions import ToolError as ToolError
-    from mcp.server.mcpserver.exceptions import UnexpectedToolError as UnexpectedToolError
-    from mcp.server.mcpserver.tools.tool_manager import ToolManager as ToolManager
 
     _SDK_V2 = True
 except ImportError:  # pragma: no cover - depends on the installed mcp
     # mcp 1.x
     from mcp.server.fastmcp import Context as Context
     from mcp.server.fastmcp import FastMCP as Server
-    from mcp.server.fastmcp.exceptions import ToolError as ToolError
-    from mcp.server.fastmcp.tools.tool_manager import ToolManager as ToolManager
 
-    UnexpectedToolError = ()  # type: ignore[assignment, misc]
     _SDK_V2 = False
 
 
@@ -125,9 +119,23 @@ def unknown_argument_message(tool: str, unknown: list[str], accepted: set[str]) 
     return f"{tool} does not take {', '.join(parts)}. Accepted arguments: {ordered}."
 
 
-def forbid_unknown_arguments_for_manager(tool_manager, name: str) -> None:
-    """Make tool ``name`` on *tool_manager* refuse arguments it does not declare."""
-    tool = tool_manager.get_tool(name)
+def forbid_unknown_arguments(server, name: str) -> None:
+    """Make tool ``name`` refuse arguments it does not declare.
+
+    The SDK's argument model ignores extra keys, so a misspelled filter
+    (``node_typ="geo"``) was dropped and the call answered as if unfiltered,
+    which reads as a filter that matched everything. With ``extra="forbid"``
+    the call fails, and the advertised schema says
+    ``additionalProperties: false``. ``_tool_manager`` and ``fn_metadata`` are
+    private but identical on 1.x and 2.x, which is why this lives here.
+
+    pydantic's own refusal ("Extra inputs are not permitted") names the key
+    but not the argument meant: ``create_node(node_name=...)`` left the caller
+    to find ``name`` in the schema. A before-validator on a subclass of the
+    tool's model refuses first, with the closest accepted names and the full
+    list (unknown_argument_message).
+    """
+    tool = server._tool_manager.get_tool(name)
     base = tool.fn_metadata.arg_model
     accepted = set(base.model_fields)
     accepted |= {field.alias for field in base.model_fields.values() if field.alias}
@@ -152,60 +160,12 @@ def forbid_unknown_arguments_for_manager(tool_manager, name: str) -> None:
     tool.parameters = model.model_json_schema(by_alias=True)
 
 
-def forbid_unknown_arguments(server, name: str) -> None:
-    """Make tool ``name`` refuse arguments it does not declare.
-
-    The SDK's argument model ignores extra keys, so a misspelled filter
-    (``node_typ="geo"``) was dropped and the call answered as if unfiltered,
-    which reads as a filter that matched everything. With ``extra="forbid"``
-    the call fails, and the advertised schema says
-    ``additionalProperties: false``. ``_tool_manager`` and ``fn_metadata`` are
-    private but identical on 1.x and 2.x, which is why this lives here.
-
-    pydantic's own refusal ("Extra inputs are not permitted") names the key
-    but not the argument meant: ``create_node(node_name=...)`` left the caller
-    to find ``name`` in the schema. A before-validator on a subclass of the
-    tool's model refuses first, with the closest accepted names and the full
-    list (unknown_argument_message).
-    """
-    forbid_unknown_arguments_for_manager(server._tool_manager, name)
-
-
-def set_server_instructions(server, instructions: str) -> None:
-    """Update the server's advertised instructions on either SDK major."""
-    lowlevel = getattr(server, "_lowlevel_server", None)
-    if lowlevel is not None:
-        lowlevel.instructions = instructions
-        return
-    inner = getattr(server, "_mcp_server", None)
-    if inner is not None:
-        inner.instructions = instructions
-
-
-def add_tool_instance(server, tool) -> None:
-    """Install a pre-built Tool instance onto *server*'s tool manager."""
-    server._tool_manager._tools[tool.name] = tool
-
-
-def sync_server_tools(server, tools_by_name: dict[str, object]) -> None:
-    """Replace *server*'s exposed tools with *tools_by_name*."""
-    server._tool_manager._tools.clear()
-    server._tool_manager._tools.update(tools_by_name)
-
-
 __all__ = [
     "Context",
     "Server",
-    "ToolError",
-    "ToolManager",
-    "UnexpectedToolError",
-    "add_tool_instance",
     "build_server",
-    "forbid_unknown_arguments",
-    "forbid_unknown_arguments_for_manager",
-    "report_progress",
     "run_server",
-    "set_server_instructions",
-    "sync_server_tools",
+    "report_progress",
+    "forbid_unknown_arguments",
     "unknown_argument_message",
 ]

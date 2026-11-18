@@ -89,65 +89,16 @@ def usage() -> str:
         "Run any command with --help for its own options.\n"
         "\n"
         "Options:\n"
-        "    --exposure full|progressive   tool exposure mode (env: FXHOUDINIMCP_EXPOSURE)\n"
-        "    -h, --help                    show this message\n"
-        "    -V, --version                 show the installed version\n"
+        "    -h, --help      show this message\n"
+        "    -V, --version   show the installed version\n"
     )
 
 
-def _parse_server_args(argv: list[str]) -> str | None:
-    """Parse server-level CLI flags, exiting 2 on unknown commands or bad options."""
-    exposure: str | None = None
-    index = 0
-    while index < len(argv):
-        arg = argv[index]
-        if arg in _HELP_FLAGS:
-            print(usage(), end="")
-            raise SystemExit(0)
-        if arg in _VERSION_FLAGS:
-            from fxhoudinimcp import __version__
-
-            print(__version__)
-            raise SystemExit(0)
-        if arg == "--exposure":
-            if index + 1 >= len(argv):
-                print(
-                    "missing value for --exposure (expected 'full' or 'progressive')\n",
-                    file=sys.stderr,
-                )
-                print(usage(), end="", file=sys.stderr)
-                raise SystemExit(2)
-            exposure = argv[index + 1]
-            index += 2
-            continue
-        if arg.startswith("--exposure="):
-            exposure = arg.split("=", 1)[1]
-            index += 1
-            continue
-
-        # Never fall through to the server. An unrecognised argument is a
-        # mistake, and starting a stdio server in response to a mistake looks
-        # exactly like a hung install.
-        print(f"unknown command: {arg}\n", file=sys.stderr)
-        print(usage(), end="", file=sys.stderr)
-        raise SystemExit(2)
-
-    if exposure is not None:
-        normalized = exposure.strip().lower()
-        if normalized not in ("full", "progressive"):
-            print(
-                f"invalid exposure mode {exposure!r}; expected 'full' or 'progressive'\n",
-                file=sys.stderr,
-            )
-            print(usage(), end="", file=sys.stderr)
-            raise SystemExit(2)
-        return normalized
-    return None
-
-
 def main() -> None:
+    from fxhoudinimcp._fork import progressive as _fork_progressive  # fork:progressive
+
+    _fork_progressive.install()  # fork:progressive
     argv = sys.argv[1:]
-    cli_exposure: str | None = None
 
     if argv:
         command, rest = argv[0], argv[1:]
@@ -166,15 +117,12 @@ def main() -> None:
             print(__version__)
             raise SystemExit(0)
 
-        cli_exposure = _parse_server_args(argv)
-
-    from fxhoudinimcp.config import exposure_mode
-
-    try:
-        resolved_exposure = cli_exposure or exposure_mode()
-    except ValueError as exc:
-        print(f"{exc}\n", file=sys.stderr)
-        raise SystemExit(2) from exc
+        # Never fall through to the server. An unrecognised argument is a
+        # mistake, and starting a stdio server in response to a mistake looks
+        # exactly like a hung install.
+        print(f"unknown command: {command}\n", file=sys.stderr)
+        print(usage(), end="", file=sys.stderr)
+        raise SystemExit(2)
 
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
@@ -186,9 +134,8 @@ def main() -> None:
     # Force import all tool modules to register them
     from fxhoudinimcp import tools as _tools  # noqa: F401
     from fxhoudinimcp._sdk import run_server
-    from fxhoudinimcp.server import configure_exposure, mcp  # noqa: F811
+    from fxhoudinimcp.server import mcp  # noqa: F811
 
-    configure_exposure(resolved_exposure)
     transport = os.getenv("MCP_TRANSPORT", "stdio")
     run_server(mcp, transport=transport)
 

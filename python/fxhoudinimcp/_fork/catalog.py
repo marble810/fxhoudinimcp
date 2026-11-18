@@ -1,21 +1,16 @@
-"""Progressive-disclosure gateway and internal tool catalog.
+"""Internal catalog of upstream Houdini tools for the progressive gateway.
 
-In ``progressive`` exposure mode the server advertises only four gateway tools
-(``houdini_discover``, ``houdini_schema``, ``houdini_call``, ``houdini_batch``)
-instead of all 200+ Houdini tools up front.  Every Houdini tool is still
-registered into an internal mirror ``ToolManager`` inside :class:`ToolCatalog`,
-preserving ``forbid_unknown_arguments``, ``compact_json`` serialization, and
-MCP ``Context`` injection.
+The catalog holds the very same SDK ``Tool`` objects upstream registered on
+the server (already wrapped for compact JSON and strict arguments), so the
+gateway executes exactly what full mode would. Nothing here knows any
+individual upstream tool by name.
 """
 
 from __future__ import annotations
 
 # Built-in
 import contextlib
-import functools
-import inspect
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Any
@@ -24,13 +19,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 # Internal
-from fxhoudinimcp._sdk import (
+from fxhoudinimcp._fork.upstream_api import (
     Context,
     ToolError,
-    ToolManager,
     UnexpectedToolError,
-    forbid_unknown_arguments,
-    forbid_unknown_arguments_for_manager,
+    new_tool_manager,
+    tool_category,
 )
 
 
@@ -57,75 +51,53 @@ class BatchCallItem(BaseModel):
     )
 
 
-class ToolCatalog:
-    """Internal mirror ``ToolManager`` storing all Houdini tools for gateway dispatch."""
+def _is_unexpected(exc: BaseException) -> bool:
+    return UnexpectedToolError is not None and isinstance(exc, UnexpectedToolError)
 
-    def __init__(self) -> None:
-        self._manager = ToolManager(warn_on_duplicate_tools=False)
+
+class ToolCatalog:
+    """Read-only index plus a private ToolManager used for dispatch."""
+
+    def __init__(self, server: Any, tools: list[Any]) -> None:
+        self._manager = new_tool_manager(server, tools)
         self._entries: dict[str, CatalogEntry] = {}
         self._categories: dict[str, list[str]] = {}
+        for tool in tools:
+            self._index(tool)
 
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    def register_tool(
-        self,
-        fn: Callable[..., Any],
-        *,
-        name: str | None = None,
-        title: str | None = None,
-        description: str | None = None,
-        annotations: Any = None,
-        icons: Any = None,
-        meta: dict[str, Any] | None = None,
-        structured_output: bool | None = None,
-        category: str | None = None,
-    ) -> Any:
-        """Register *fn* in the internal mirror ToolManager and index its metadata."""
-        tool_name = name or fn.__name__
-        self._manager.add_tool(
-            fn,
-            name=name,
-            title=title,
-            description=description,
-            annotations=annotations,
-            icons=icons,
-            meta=meta,
-            structured_output=structured_output,
-        )
-        forbid_unknown_arguments_for_manager(self._manager, tool_name)
-        tool = self._manager.get_tool(tool_name)
-        cat = category or fn.__module__.rsplit(".", 1)[-1]
-        doc = (getattr(tool, "description", None) or inspect.getdoc(fn) or "").strip()
+    def _index(self, tool: Any) -> None:
+        category = tool_category(tool)
+        doc = (getattr(tool, "description", None) or "").strip()
         summary = next((line.strip() for line in doc.splitlines() if line.strip()), "")
-
-        self._entries[tool_name] = CatalogEntry(
-            name=tool_name,
-            category=cat,
+        self._entries[tool.name] = CatalogEntry(
+            name=tool.name,
+            category=category,
             summary=summary,
             description=doc,
             tool=tool,
         )
-        bucket = self._categories.setdefault(cat, [])
-        if tool_name not in bucket:
-            bucket.append(tool_name)
-        return tool
+        bucket = self._categories.setdefault(category, [])
+        if tool.name not in bucket:
+            bucket.append(tool.name)
+
+    def __len__(self) -> int:
+        return len(self._entries)
 
     def get(self, name: str) -> CatalogEntry | None:
         """Return the :class:`CatalogEntry` for *name*, or ``None``."""
         return self._entries.get(name)
 
     def names(self) -> list[str]:
-        """All registered Houdini tool names in registration order."""
+        """All tool names in registration order."""
         return list(self._entries)
 
     def categories(self) -> dict[str, list[str]]:
-        """Mapping of category name to registered tool names."""
+        """Mapping of category name to tool names."""
         return {cat: list(names) for cat, names in self._categories.items()}
 
-    def tools_map(self) -> dict[str, Any]:
-        """Mapping of tool name to SDK ``Tool`` object."""
-        return {name: entry.tool for name, entry in self._entries.items()}
+    def tools(self) -> list[Any]:
+        """The SDK ``Tool`` objects, in registration order."""
+        return [entry.tool for entry in self._entries.values()]
 
     def _suggestions(self, name: str, limit: int = 5) -> list[str]:
         all_names = list(self._entries)
@@ -140,13 +112,23 @@ class ToolCatalog:
                 break
         return ordered
 
+    def _unknown_tool_error(self, tool_name: str) -> ToolError:
+        suggestions = self._suggestions(tool_name)
+        hint = f" Did you mean: {suggestions}?" if suggestions else ""
+        return ToolError(
+            f"Unknown Houdini tool '{tool_name}'.{hint} "
+            "Use houdini_discover to find available tools."
+        )
+
+    # -- discover ---------------------------------------------------------
+
     def discover(
         self,
         query: str | None = None,
         category: str | None = None,
         limit: int = 30,
     ) -> dict[str, Any]:
-        """Browse categories or search registered Houdini tools."""
+        """Browse categories or search tools by keywords."""
         if limit < 1:
             raise ToolError("limit must be at least 1.")
         effective_limit = min(limit, 250)
@@ -165,11 +147,7 @@ class ToolCatalog:
                 "total_tools": len(self._entries),
                 "total_categories": len(self._categories),
                 "categories": [
-                    {
-                        "category": cat,
-                        "count": len(names),
-                        "tools": list(names),
-                    }
+                    {"category": cat, "count": len(names), "tools": list(names)}
                     for cat, names in sorted(self._categories.items())
                 ],
             }
@@ -219,14 +197,13 @@ class ToolCatalog:
             props = entry.tool.parameters.get("properties", {})
             required = list(entry.tool.parameters.get("required", []))
             required_set = set(required)
-            optional = [k for k in props if k not in required_set]
             shown.append(
                 {
                     "name": entry.name,
                     "category": entry.category,
                     "summary": entry.summary,
                     "required_args": required,
-                    "optional_args": optional,
+                    "optional_args": [k for k in props if k not in required_set],
                 }
             )
 
@@ -235,6 +212,16 @@ class ToolCatalog:
             "returned": len(shown),
             "truncated": total_matches > len(shown),
             "tools": shown,
+        }
+
+    # -- schema -----------------------------------------------------------
+
+    def _schema_payload(self, entry: CatalogEntry) -> dict[str, Any]:
+        return {
+            "name": entry.name,
+            "category": entry.category,
+            "description": entry.description,
+            "input_schema": entry.tool.parameters,
         }
 
     def schema_for(
@@ -249,18 +236,8 @@ class ToolCatalog:
         if tool_name is not None and tool_names is None:
             entry = self.get(tool_name)
             if entry is None:
-                suggestions = self._suggestions(tool_name)
-                hint = f" Did you mean: {suggestions}?" if suggestions else ""
-                raise ToolError(
-                    f"Unknown Houdini tool '{tool_name}'.{hint} "
-                    "Use houdini_discover to find available tools."
-                )
-            return {
-                "name": entry.name,
-                "category": entry.category,
-                "description": entry.description,
-                "input_schema": entry.tool.parameters,
-            }
+                raise self._unknown_tool_error(tool_name)
+            return self._schema_payload(entry)
 
         requested: list[str] = []
         if tool_name is not None:
@@ -279,12 +256,7 @@ class ToolCatalog:
                     "suggestions": self._suggestions(name),
                 }
             else:
-                found[name] = {
-                    "name": entry.name,
-                    "category": entry.category,
-                    "description": entry.description,
-                    "input_schema": entry.tool.parameters,
-                }
+                found[name] = self._schema_payload(entry)
 
         if not found and missing:
             first_name = next(iter(missing))
@@ -300,6 +272,8 @@ class ToolCatalog:
             payload["missing"] = missing
         return payload
 
+    # -- call / batch -----------------------------------------------------
+
     def _format_validation_failure(self, entry: CatalogEntry, err_msg: str) -> str:
         schema_json = json.dumps(entry.tool.parameters, separators=(",", ":"), ensure_ascii=False)
         return (
@@ -308,20 +282,7 @@ class ToolCatalog:
             f"Tool '{entry.name}' schema:\n{schema_json}"
         )
 
-    def _unknown_tool_error(self, tool_name: str) -> ToolError:
-        suggestions = self._suggestions(tool_name)
-        hint = f" Did you mean: {suggestions}?" if suggestions else ""
-        return ToolError(
-            f"Unknown Houdini tool '{tool_name}'.{hint} "
-            "Use houdini_discover to find available tools."
-        )
-
-    async def call(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any] | None,
-        ctx: Context,
-    ) -> Any:
+    async def call(self, tool_name: str, arguments: dict[str, Any] | None, ctx: Context) -> Any:
         """Validate and execute *tool_name* with *arguments* and *ctx*."""
         entry = self.get(tool_name)
         if entry is None:
@@ -333,7 +294,7 @@ class ToolCatalog:
         except ValidationError as exc:
             raise ToolError(self._format_validation_failure(entry, str(exc))) from exc
         except ToolError as exc:
-            if UnexpectedToolError and isinstance(exc, UnexpectedToolError):
+            if _is_unexpected(exc):
                 cause = exc.__cause__
                 if cause is not None:
                     raise ToolError(f"{tool_name} failed: {cause}") from cause
@@ -360,13 +321,13 @@ class ToolCatalog:
         stopped_early = False
 
         for index, item in enumerate(calls):
+            base = {"index": index, "tool_name": item.tool_name}
             entry = self.get(item.tool_name)
             if entry is None:
                 failed += 1
                 results.append(
                     {
-                        "index": index,
-                        "tool_name": item.tool_name,
+                        **base,
                         "ok": False,
                         "error": f"Unknown Houdini tool '{item.tool_name}'.",
                         "suggestions": self._suggestions(item.tool_name),
@@ -378,76 +339,35 @@ class ToolCatalog:
                 continue
 
             args = {} if item.arguments is None else item.arguments
+            validation_detail = {
+                "docstring": entry.description,
+                "input_schema": entry.tool.parameters,
+            }
             try:
                 raw = await self._manager.call_tool(item.tool_name, args, ctx, convert_result=False)
             except ValidationError as exc:
                 failed += 1
-                results.append(
-                    {
-                        "index": index,
-                        "tool_name": item.tool_name,
-                        "ok": False,
-                        "error": str(exc),
-                        "docstring": entry.description,
-                        "input_schema": entry.tool.parameters,
-                    }
-                )
+                results.append({**base, "ok": False, "error": str(exc), **validation_detail})
             except ToolError as exc:
                 failed += 1
-                if UnexpectedToolError and isinstance(exc, UnexpectedToolError):
-                    cause = exc.__cause__ or exc
-                    results.append(
-                        {
-                            "index": index,
-                            "tool_name": item.tool_name,
-                            "ok": False,
-                            "error": str(cause),
-                        }
-                    )
+                if _is_unexpected(exc):
+                    results.append({**base, "ok": False, "error": str(exc.__cause__ or exc)})
                 elif isinstance(exc.__cause__, ValidationError):
                     results.append(
-                        {
-                            "index": index,
-                            "tool_name": item.tool_name,
-                            "ok": False,
-                            "error": str(exc.__cause__),
-                            "docstring": entry.description,
-                            "input_schema": entry.tool.parameters,
-                        }
+                        {**base, "ok": False, "error": str(exc.__cause__), **validation_detail}
                     )
                 else:
-                    results.append(
-                        {
-                            "index": index,
-                            "tool_name": item.tool_name,
-                            "ok": False,
-                            "error": str(exc),
-                        }
-                    )
+                    results.append({**base, "ok": False, "error": str(exc)})
             except Exception as exc:
                 failed += 1
-                results.append(
-                    {
-                        "index": index,
-                        "tool_name": item.tool_name,
-                        "ok": False,
-                        "error": str(exc),
-                    }
-                )
+                results.append({**base, "ok": False, "error": str(exc)})
             else:
                 succeeded += 1
                 decoded = raw
                 if isinstance(raw, str):
                     with contextlib.suppress(json.JSONDecodeError):
                         decoded = json.loads(raw)
-                results.append(
-                    {
-                        "index": index,
-                        "tool_name": item.tool_name,
-                        "ok": True,
-                        "result": decoded,
-                    }
-                )
+                results.append({**base, "ok": True, "result": decoded})
                 continue
 
             if stop_on_error:
@@ -462,93 +382,3 @@ class ToolCatalog:
             "stopped_early": stopped_early,
             "results": results,
         }
-
-
-def register_gateway_tools(
-    server: Any,
-    sdk_tool: Callable[..., Any],
-    catalog: ToolCatalog,
-    compact_serializer: Callable[[dict], str],
-) -> None:
-    """Register the four progressive-disclosure gateway tools on *server*."""
-
-    def _register(fn: Callable[..., Any]) -> None:
-        @functools.wraps(fn)
-        async def compact(*call_args, **call_kwargs):
-            result = await fn(*call_args, **call_kwargs)
-            return compact_serializer(result) if isinstance(result, dict) else result
-
-        with contextlib.suppress(Exception):
-            compact.__signature__ = inspect.signature(fn, eval_str=True)
-        sdk_tool()(compact)
-        forbid_unknown_arguments(server, fn.__name__)
-
-    async def houdini_discover(
-        query: str | None = None,
-        category: str | None = None,
-        limit: int = 30,
-    ) -> dict:
-        """Browse categories or search all Houdini MCP tools without loading schemas.
-
-        Call with no arguments to list all 24 categories and their tool names.
-        Pass ``category`` and/or space-separated ``query`` keywords to view
-        tool summaries and required/optional argument names.
-
-        Args:
-            query: Optional space-separated keywords matched against tool names,
-                categories, parameter names, and descriptions.
-            category: Optional category name (e.g. "nodes", "lops", "geometry").
-            limit: Maximum number of matching tools to return (1-250).
-        """
-        return catalog.discover(query=query, category=category, limit=limit)
-
-    async def houdini_schema(
-        tool_name: str | None = None,
-        tool_names: list[str] | None = None,
-    ) -> dict:
-        """Get full docstrings and parameter JSON schemas for Houdini tools.
-
-        Pass ``tool_name`` for a single tool, or ``tool_names`` to inspect
-        multiple tools in one round-trip before calling ``houdini_call`` or
-        ``houdini_batch``.
-
-        Args:
-            tool_name: Single Houdini tool name.
-            tool_names: List of Houdini tool names to inspect together.
-        """
-        return catalog.schema_for(tool_name=tool_name, tool_names=tool_names)
-
-    async def houdini_call(
-        ctx: Context,
-        tool_name: str,
-        arguments: dict[str, Any] | None = None,
-    ) -> Any:
-        """Validate and execute any registered Houdini tool by name.
-
-        Enforces the target tool's strict parameter schema (including unknown
-        argument rejection with did-you-mean hints). If validation fails, the
-        error automatically includes the target tool's docstring and schema.
-
-        Args:
-            tool_name: Target Houdini tool name (from ``houdini_discover``).
-            arguments: Keyword arguments object for the target tool.
-        """
-        return await catalog.call(tool_name, arguments, ctx)
-
-    async def houdini_batch(
-        ctx: Context,
-        calls: list[BatchCallItem],
-        stop_on_error: bool = True,
-    ) -> dict:
-        """Execute multiple Houdini tool calls sequentially in one round-trip.
-
-        Each item is ``{"tool_name": "...", "arguments": {...}}``.
-
-        Args:
-            calls: Ordered list of tool calls to execute.
-            stop_on_error: Stop immediately after the first failed call.
-        """
-        return await catalog.run_batch(calls, ctx, stop_on_error=stop_on_error)
-
-    for gateway_fn in (houdini_discover, houdini_schema, houdini_call, houdini_batch):
-        _register(gateway_fn)

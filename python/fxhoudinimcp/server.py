@@ -20,22 +20,13 @@ from contextlib import asynccontextmanager
 from fxhoudinimcp._loader import load_markdown
 
 # Third-party
-from fxhoudinimcp._sdk import (
-    Server,
-    add_tool_instance,
-    build_server,
-    report_progress,
-    set_server_instructions,
-    sync_server_tools,
-)
+from fxhoudinimcp._sdk import Server, build_server, forbid_unknown_arguments, report_progress
 from fxhoudinimcp._version import __version__
 
 # Internal
 from fxhoudinimcp.bridge import HoudiniBridge, find_servers
 from fxhoudinimcp.compat import compatibility_warning
-from fxhoudinimcp.config import EXPOSURE_MODES, exposure_mode
 from fxhoudinimcp.node_versions import staleness_warning
-from fxhoudinimcp.progressive import ToolCatalog, register_gateway_tools
 
 logger = logging.getLogger(__name__)
 
@@ -208,23 +199,9 @@ async def lifespan(server: Server):
         await bridge.close()
 
 
-def load_instructions(mode: str | None = None) -> str:
-    """Load the server instructions matching *mode* (``full`` or ``progressive``)."""
-    resolved = exposure_mode() if mode is None else mode
-    if resolved == "progressive":
-        return load_markdown("instructions/server_instructions_progressive.md")
-    if resolved == "full":
-        return load_markdown("instructions/server_instructions.md")
-    expected = ", ".join(EXPOSURE_MODES)
-    raise ValueError(f"Invalid exposure mode {resolved!r}; expected one of: {expected}.")
-
-
-_initial_exposure = exposure_mode()
-_exposure_mode = _initial_exposure
-
 mcp = build_server(
     name="FXHoudini",
-    instructions=load_instructions(_initial_exposure),
+    instructions=load_markdown("instructions/server_instructions.md"),
     lifespan=lifespan,
     version=__version__,
 )
@@ -254,23 +231,16 @@ def compact_json(result: dict) -> str:
     return json.dumps(_trim(result), separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-catalog = ToolCatalog()
 _sdk_tool = mcp.tool
 
 
 def _compact_tool(*args, **kwargs):
-    """mcp.tool(), registering a compact-JSON copy into ToolCatalog and full mode.
+    """mcp.tool(), registering a copy that answers in compact JSON.
 
     The module-level function stays the original, returning its dict, so code
     and tests that call a tool directly see no difference.
     """
-    name = kwargs.get("name") if "name" in kwargs else (args[0] if args else None)
-    title = kwargs.get("title")
-    description = kwargs.get("description")
-    annotations = kwargs.get("annotations")
-    icons = kwargs.get("icons")
-    meta = kwargs.get("meta")
-    structured_output = kwargs.get("structured_output")
+    register = _sdk_tool(*args, **kwargs)
 
     def decorator(function):
         @functools.wraps(function)
@@ -284,49 +254,11 @@ def _compact_tool(*args, **kwargs):
         # __signature__ stops the unwrapping.
         with contextlib.suppress(Exception):
             compact.__signature__ = inspect.signature(function, eval_str=True)
-
-        tool = catalog.register_tool(
-            compact,
-            name=name,
-            title=title,
-            description=description,
-            annotations=annotations,
-            icons=icons,
-            meta=meta,
-            structured_output=structured_output,
-        )
-        if _exposure_mode == "full":
-            add_tool_instance(mcp, tool)
+        register(compact)
+        forbid_unknown_arguments(mcp, kwargs.get("name") or function.__name__)
         return function
 
     return decorator
 
 
 mcp.tool = _compact_tool
-
-if _initial_exposure == "progressive":
-    register_gateway_tools(mcp, _sdk_tool, catalog, compact_json)
-
-
-def current_exposure_mode() -> str:
-    """Return the active tool exposure mode (``full`` or ``progressive``)."""
-    return _exposure_mode
-
-
-def configure_exposure(mode: str | None = None) -> str:
-    """Switch the server's exposed tools and instructions to ``full`` or ``progressive``."""
-    global _exposure_mode
-    resolved = exposure_mode() if mode is None else mode.strip().lower()
-    if resolved not in EXPOSURE_MODES:
-        expected = ", ".join(EXPOSURE_MODES)
-        raise ValueError(f"Invalid exposure mode {resolved!r}; expected one of: {expected}.")
-
-    _exposure_mode = resolved
-    if resolved == "progressive":
-        sync_server_tools(mcp, {})
-        register_gateway_tools(mcp, _sdk_tool, catalog, compact_json)
-    else:
-        sync_server_tools(mcp, catalog.tools_map())
-
-    set_server_instructions(mcp, load_instructions(resolved))
-    return resolved
