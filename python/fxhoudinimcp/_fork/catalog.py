@@ -51,8 +51,19 @@ class BatchCallItem(BaseModel):
     )
 
 
-def _is_unexpected(exc: BaseException) -> bool:
-    return UnexpectedToolError is not None and isinstance(exc, UnexpectedToolError)
+def _wraps_tool_exception(exc: BaseException) -> bool:
+    """Whether the SDK wrapped an exception the tool itself raised.
+
+    mcp 2.x raises ``UnexpectedToolError``; 1.x raises a plain ``ToolError``
+    ("Error executing tool X: ...") chained to the original exception. A
+    ``ToolError`` the tool raised on purpose has no foreign cause.
+    """
+    cause = exc.__cause__
+    if cause is None:
+        return False
+    if UnexpectedToolError is not None and isinstance(exc, UnexpectedToolError):
+        return True
+    return not isinstance(cause, ToolError | ValidationError)
 
 
 class ToolCatalog:
@@ -294,15 +305,11 @@ class ToolCatalog:
         except ValidationError as exc:
             raise ToolError(self._format_validation_failure(entry, str(exc))) from exc
         except ToolError as exc:
-            if _is_unexpected(exc):
-                cause = exc.__cause__
-                if cause is not None:
-                    raise ToolError(f"{tool_name} failed: {cause}") from cause
-                raise
-            if isinstance(exc.__cause__, ValidationError):
-                raise ToolError(
-                    self._format_validation_failure(entry, str(exc.__cause__))
-                ) from exc.__cause__
+            cause = exc.__cause__
+            if isinstance(cause, ValidationError):
+                raise ToolError(self._format_validation_failure(entry, str(cause))) from cause
+            if _wraps_tool_exception(exc):
+                raise ToolError(f"{tool_name} failed: {cause}") from cause
             raise
         except Exception as exc:
             raise ToolError(f"{tool_name} failed: {exc}") from exc
@@ -350,12 +357,12 @@ class ToolCatalog:
                 results.append({**base, "ok": False, "error": str(exc), **validation_detail})
             except ToolError as exc:
                 failed += 1
-                if _is_unexpected(exc):
-                    results.append({**base, "ok": False, "error": str(exc.__cause__ or exc)})
-                elif isinstance(exc.__cause__, ValidationError):
+                if isinstance(exc.__cause__, ValidationError):
                     results.append(
                         {**base, "ok": False, "error": str(exc.__cause__), **validation_detail}
                     )
+                elif _wraps_tool_exception(exc):
+                    results.append({**base, "ok": False, "error": str(exc.__cause__)})
                 else:
                     results.append({**base, "ok": False, "error": str(exc)})
             except Exception as exc:
