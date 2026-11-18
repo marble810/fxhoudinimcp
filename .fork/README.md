@@ -24,7 +24,7 @@ Server instructions = 网关前言（[`_fork/preamble.md`](../python/fxhoudinimc
 
 ```mermaid
 flowchart LR
-    main["upstream __main__.main()"] -->|"3 行 hook（# fork:progressive）"| install["_fork.progressive.install()"]
+    main["upstream __main__.main()"] -->|"3 行 hook（# fork:progressive）"| install["_fork.install_hook()"]
     install -->|"剥离 --exposure，写 env"| main
     install -->|"包装 _sdk.run_server"| wrap
     main -->|"导入全部 tools 后 run_server(mcp)"| wrap["包装后的 run_server"]
@@ -32,7 +32,7 @@ flowchart LR
     wrap --> run["上游原 run_server"]
 ```
 
-- 上游文件中**唯一**的改动：`python/fxhoudinimcp/__main__.py` 的 `main()` 开头插入 3 行带 `# fork:progressive` 标记的 hook（由 `sync.py` 自动维护）。
+- 上游文件中**唯一**的改动：`python/fxhoudinimcp/__main__.py` 的 `main()` 开头插入 3 行带 `# fork:progressive` 标记的 hook（由 `sync.py` 自动维护）。`install_hook` 带兜底：若 fork 代码因上游变化无法导入，`full` 模式照常启动上游，只有显式请求 `progressive` 才以退出码 2 报错——fork 坏了也不会拖垮上游 CLI。
 - `server.py` / `_sdk.py` / `config.py` 与上游完全一致。网关复用上游注册好的**同一个 SDK Tool 对象**（已带 compact JSON 与严格参数校验），不复制任何上游逻辑。
 - 所有对上游 API 和 MCP SDK 私有属性的依赖集中在 [`_fork/upstream_api.py`](../python/fxhoudinimcp/_fork/upstream_api.py)：上游/SDK 改名时只坏这一个文件。
 - 测试 [`tests/test_fork_progressive.py`](../tests/test_fork_progressive.py) 不硬编码任何具体上游工具名，全部从上游当前注册的工具动态推导。

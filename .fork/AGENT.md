@@ -147,3 +147,6 @@ blocking problem: <exact last 20 lines of sync.py output, if NEEDS-HUMAN>
    until it asserts nothing.
 5. Never land on main without `VERIFY OK`. Use `finish`, which re-verifies.
 6. When unsure, stop and report. A clean "needs human" beats a wrong merge.
+7. `python/fxhoudinimcp/_fork/__init__.py` must keep importing only the
+   standard library. It is the safety net that keeps upstream's CLI running
+   when the rest of the fork breaks.

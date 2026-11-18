@@ -95,9 +95,9 @@ def usage() -> str:
 
 
 def main() -> None:
-    from fxhoudinimcp._fork import progressive as _fork_progressive  # fork:progressive
+    from fxhoudinimcp._fork import install_hook  # fork:progressive
 
-    _fork_progressive.install()  # fork:progressive
+    install_hook()  # fork:progressive
     argv = sys.argv[1:]
 
     if argv:

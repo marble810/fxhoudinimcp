@@ -475,6 +475,37 @@ class TestUpstreamEntryPointHook:
         assert not started
 
 
+class TestHookFallbackWhenForkIsBroken:
+    """If the fork stops importing, upstream's CLI must keep working in full mode."""
+
+    @pytest.fixture
+    def broken_fork(self, monkeypatch):
+        # A None entry in sys.modules makes `import` raise ImportError; the
+        # package attribute must go too, or `from pkg import mod` finds it.
+        import fxhoudinimcp._fork
+
+        monkeypatch.setitem(sys.modules, "fxhoudinimcp._fork.progressive", None)
+        monkeypatch.delattr(fxhoudinimcp._fork, "progressive")
+        monkeypatch.setenv(progressive.EXPOSURE_ENV, "full")
+
+    def test_full_mode_survives(self, broken_fork, capsys):
+        from fxhoudinimcp._fork import install_hook
+
+        argv = ["fxhoudinimcp", "--exposure", "full", "--help"]
+        install_hook(argv)
+        assert argv == ["fxhoudinimcp", "--help"]
+        assert "fork extensions disabled" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("args", [["--exposure", "progressive"], ["--exposure=progressive"]])
+    def test_progressive_request_fails_loudly(self, broken_fork, capsys, args):
+        from fxhoudinimcp._fork import install_hook
+
+        with pytest.raises(SystemExit) as exc_info:
+            install_hook(["fxhoudinimcp", *args])
+        assert exc_info.value.code == 2
+        assert "unavailable" in capsys.readouterr().err
+
+
 def test_module_import_has_no_side_effects():
     """Importing the fork must not change the upstream server by itself."""
     code = (

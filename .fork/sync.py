@@ -48,9 +48,9 @@ HOOK_MARKER = "# fork:progressive"
 HOOKED_FILE = "python/fxhoudinimcp/__main__.py"
 HOOK_FUNCTION = "main"
 HOOK_LINES = (
-    f"from fxhoudinimcp._fork import progressive as _fork_progressive  {HOOK_MARKER}",
+    f"from fxhoudinimcp._fork import install_hook  {HOOK_MARKER}",
     "",  # ruff format wants a blank line after an import
-    f"_fork_progressive.install()  {HOOK_MARKER}",
+    f"install_hook()  {HOOK_MARKER}",
 )
 
 # Lint/format only what the fork wrote; upstream lints its own code.
@@ -427,6 +427,7 @@ def run_pytest(cwd: Path, extra_env: dict[str, str] | None = None) -> tuple[int,
             "-rfE",
             "-p",
             "no:cacheprovider",
+            "--continue-on-collection-errors",
         ],
         cwd=cwd,
         env=env,
@@ -453,10 +454,11 @@ def baseline_failures(ref: str) -> set[str]:
                 shutil.copy2(source, worktree / generated)
         say(f"Running upstream baseline tests at {ref[:10]} ...")
         _, failed, output = run_pytest(worktree, {"PYTHONPATH": str(worktree / "python")})
-        if "error during collection" in output or "errors during collection" in output:
+        passed = re.search(r"(\d+) passed", output)
+        if not passed or int(passed.group(1)) == 0:
             say(output[-3000:])
             raise SyncError(
-                "the upstream baseline test run could not even collect tests (see above); "
+                "the upstream baseline test run passed no tests at all (see above); "
                 "fix the environment (python -m pip install -e .[dev]) and rerun verify"
             )
         return failed

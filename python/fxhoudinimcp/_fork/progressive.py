@@ -7,8 +7,10 @@ and runs through the exact same SDK ``Tool`` object full mode would use.
 
 How it attaches to upstream, without editing upstream code beyond one hook:
 
-1. ``fxhoudinimcp.__main__.main`` starts with two lines marked
-   ``# fork:progressive`` that call :func:`install`.
+1. ``fxhoudinimcp.__main__.main`` starts with lines marked
+   ``# fork:progressive`` that call ``fxhoudinimcp._fork.install_hook``, which
+   calls :func:`install` (or, if this module cannot import, keeps upstream's
+   full mode running).
 2. :func:`install` strips ``--exposure MODE`` / ``--exposure=MODE`` from
    ``sys.argv`` (so upstream's argument handling never sees it), records the
    mode in ``FXHOUDINIMCP_EXPOSURE``, and wraps ``fxhoudinimcp._sdk.run_server``.
