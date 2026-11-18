@@ -288,33 +288,43 @@ class TestGatewayCallAndBatch:
             )
 
 
-class TestExposureParsing:
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [(None, "full"), ("", "full"), ("FULL", "full"), (" progressive ", "progressive")],
-    )
-    def test_resolve_mode(self, raw, expected):
-        assert progressive.resolve_mode(raw) == expected
+class TestLegacyExposureFlag:
+    """Old client configs may still pass ``--exposure progressive``."""
 
-    def test_resolve_mode_rejects_unknown(self):
-        with pytest.raises(ValueError, match="FXHOUDINIMCP_EXPOSURE"):
-            progressive.resolve_mode("minimal")
+    @pytest.mark.parametrize("raw", [None, "", "progressive", " PROGRESSIVE "])
+    def test_progressive_or_empty_is_accepted(self, raw):
+        progressive.check_legacy_mode(raw, source="X")
+
+    def test_full_points_to_upstream(self):
+        with pytest.raises(ValueError, match="pip install fxhoudinimcp"):
+            progressive.check_legacy_mode("full", source="X")
+
+    def test_unknown_is_refused(self):
+        with pytest.raises(ValueError, match="progressive-only"):
+            progressive.check_legacy_mode("minimal", source="X")
 
     @pytest.mark.parametrize(
-        ("args", "remaining", "mode"),
+        ("args", "remaining"),
         [
-            ([], [], None),
-            (["--exposure", "progressive"], [], "progressive"),
-            (["--exposure=full"], [], "full"),
-            (["--help", "--exposure", "progressive"], ["--help"], "progressive"),
-            (["install", "--force"], ["install", "--force"], None),
+            ([], []),
+            (["--exposure", "progressive"], []),
+            (["--exposure=progressive"], []),
+            (["--help", "--exposure", "progressive"], ["--help"]),
+            (["install", "--force"], ["install", "--force"]),
         ],
     )
-    def test_consume_cli_args(self, args, remaining, mode):
-        assert progressive.consume_cli_args(args) == (remaining, mode)
+    def test_consume_cli_args(self, args, remaining):
+        assert progressive.consume_cli_args(args) == remaining
 
     @pytest.mark.parametrize(
-        "args", [["--exposure"], ["--exposure", "bogus"], ["--exposure="], ["--exposure", "-h"]]
+        "args",
+        [
+            ["--exposure"],
+            ["--exposure", "bogus"],
+            ["--exposure=full"],
+            ["--exposure="],
+            ["--exposure", "-h"],
+        ],
     )
     def test_consume_cli_args_rejects(self, args):
         with pytest.raises(ValueError):
@@ -410,7 +420,7 @@ class TestUpstreamInvariants:
 
 
 class TestUpstreamEntryPointHook:
-    """The two ``# fork:progressive`` lines in upstream ``main()`` still work."""
+    """The ``# fork:progressive`` lines in upstream ``main()`` still work."""
 
     @pytest.fixture
     def started(self, monkeypatch, real_server):
@@ -422,7 +432,7 @@ class TestUpstreamEntryPointHook:
             record["instructions"] = get_instructions(server)
 
         monkeypatch.setattr(sdk_module, "run_server", fake_run_server)
-        monkeypatch.setenv(progressive.EXPOSURE_ENV, "full")
+        monkeypatch.delenv(progressive.LEGACY_EXPOSURE_ENV, raising=False)
         monkeypatch.delenv("MCP_TRANSPORT", raising=False)
         try:
             yield record
@@ -441,34 +451,38 @@ class TestUpstreamEntryPointHook:
         source = Path(entry.__file__).read_text(encoding="utf-8")
         assert source.count(progressive.HOOK_MARKER) == 2
 
-    @pytest.mark.parametrize("args", [["--exposure", "progressive"], ["--exposure=progressive"]])
-    def test_cli_flag_starts_gateway(self, monkeypatch, started, args):
-        self._main(monkeypatch, *args)
+    def test_plain_start_serves_only_the_gateway(self, monkeypatch, started, real_server):
+        before = [t.name for t in list_tool_objects(real_server)]
+        self._main(monkeypatch)
         assert started["tools"] == GATEWAYS
         assert started["transport"] == "stdio"
         assert "progressive gateway" in started["instructions"]
+        # Upstream's own tests call main() with server.run patched; the shared
+        # server must be back to normal once run_server returns.
+        assert [t.name for t in list_tool_objects(real_server)] == before
+        assert progressive.current_catalog(real_server) is None
 
-    def test_env_var_starts_gateway(self, monkeypatch, started):
-        monkeypatch.setenv(progressive.EXPOSURE_ENV, "progressive")
+    @pytest.mark.parametrize("args", [["--exposure", "progressive"], ["--exposure=progressive"]])
+    def test_legacy_flag_still_starts(self, monkeypatch, started, args):
+        self._main(monkeypatch, *args)
+        assert started["tools"] == GATEWAYS
+
+    def test_legacy_env_progressive_still_starts(self, monkeypatch, started):
+        monkeypatch.setenv(progressive.LEGACY_EXPOSURE_ENV, "progressive")
         self._main(monkeypatch)
         assert started["tools"] == GATEWAYS
 
-    def test_full_mode_is_untouched(self, monkeypatch, started, real_server):
-        expected = {t.name for t in list_tool_objects(real_server)}
-        self._main(monkeypatch)
-        assert started["tools"] == expected
-        assert "progressive gateway" not in started["instructions"]
-
-    @pytest.mark.parametrize("args", [["--exposure"], ["--exposure", "bogus"]])
-    def test_bad_flag_exits_2(self, monkeypatch, capsys, started, args):
+    @pytest.mark.parametrize("args", [["--exposure", "full"], ["--exposure"], ["--exposure=x"]])
+    def test_other_flags_exit_2(self, monkeypatch, capsys, started, args):
         with pytest.raises(SystemExit) as exc_info:
             self._main(monkeypatch, *args)
         assert exc_info.value.code == 2
         assert "exposure" in capsys.readouterr().err
         assert not started
 
-    def test_bad_env_exits_2_at_start(self, monkeypatch, capsys, started):
-        monkeypatch.setenv(progressive.EXPOSURE_ENV, "minimal")
+    @pytest.mark.parametrize("value", ["full", "minimal"])
+    def test_other_env_exits_2_at_start(self, monkeypatch, started, value):
+        monkeypatch.setenv(progressive.LEGACY_EXPOSURE_ENV, value)
         with pytest.raises(SystemExit) as exc_info:
             self._main(monkeypatch)
         assert exc_info.value.code == 2
@@ -476,7 +490,7 @@ class TestUpstreamEntryPointHook:
 
 
 class TestHookFallbackWhenForkIsBroken:
-    """If the fork stops importing, upstream's CLI must keep working in full mode."""
+    """If the fork stops importing, subcommands work but the server refuses to start."""
 
     @pytest.fixture
     def broken_fork(self, monkeypatch):
@@ -486,24 +500,23 @@ class TestHookFallbackWhenForkIsBroken:
 
         monkeypatch.setitem(sys.modules, "fxhoudinimcp._fork.progressive", None)
         monkeypatch.delattr(fxhoudinimcp._fork, "progressive")
-        monkeypatch.setenv(progressive.EXPOSURE_ENV, "full")
 
-    def test_full_mode_survives(self, broken_fork, capsys):
+    def test_subcommands_survive(self, broken_fork, capsys):
         from fxhoudinimcp._fork import install_hook
 
-        argv = ["fxhoudinimcp", "--exposure", "full", "--help"]
+        argv = ["fxhoudinimcp", "--exposure", "progressive", "--help"]
         install_hook(argv)
         assert argv == ["fxhoudinimcp", "--help"]
-        assert "fork extensions disabled" in capsys.readouterr().err
+        assert "unavailable" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("args", [["--exposure", "progressive"], ["--exposure=progressive"]])
-    def test_progressive_request_fails_loudly(self, broken_fork, capsys, args):
+    @pytest.mark.parametrize("args", [[], ["--exposure", "progressive"], ["--exposure=full"]])
+    def test_server_start_fails_loudly(self, broken_fork, capsys, args):
         from fxhoudinimcp._fork import install_hook
 
         with pytest.raises(SystemExit) as exc_info:
             install_hook(["fxhoudinimcp", *args])
         assert exc_info.value.code == 2
-        assert "unavailable" in capsys.readouterr().err
+        assert "cannot start its gateway" in capsys.readouterr().err
 
 
 def test_module_import_has_no_side_effects():

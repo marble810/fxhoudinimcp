@@ -1,15 +1,14 @@
 # Fork 说明（marble810/fxhoudinimcp）
 
-本 fork 在上游 [healkeiser/fxhoudinimcp](https://github.com/healkeiser/fxhoudinimcp) 之上只加了一个功能：**渐进式披露（progressive disclosure）模式**。目标是：上游怎么改都能被低成本 LLM 自动合并。
+本 fork 在上游 [healkeiser/fxhoudinimcp](https://github.com/healkeiser/fxhoudinimcp) 之上只做一件事：**MCP server 只提供渐进式披露（progressive disclosure）网关**。想要 200+ 工具全部展开，直接用上游原版（`pip install fxhoudinimcp`）。目标是：上游怎么改都能被低成本 LLM 自动合并。
 
 ## 使用
 
 ```bash
-fxhoudinimcp --exposure progressive        # CLI 参数
-FXHOUDINIMCP_EXPOSURE=progressive fxhoudinimcp   # 或环境变量（MCP 客户端配置里设 env）
+fxhoudinimcp        # 直接启动即为 progressive，无需任何参数
 ```
 
-默认 `full`，此时行为与上游**逐字节一致**。`progressive` 时只暴露 4 个网关工具：
+旧配置里的 `--exposure progressive` / `FXHOUDINIMCP_EXPOSURE=progressive` 仍被接受（忽略）；`full` 或其它值以退出码 2 拒绝，并提示改用上游。只暴露 4 个网关工具：
 
 | 工具 | 作用 |
 |---|---|
@@ -25,14 +24,14 @@ Server instructions = 网关前言（[`_fork/preamble.md`](../python/fxhoudinimc
 ```mermaid
 flowchart LR
     main["upstream __main__.main()"] -->|"3 行 hook（# fork:progressive）"| install["_fork.install_hook()"]
-    install -->|"剥离 --exposure，写 env"| main
+    install -->|"剥离旧的 --exposure progressive"| main
     install -->|"包装 _sdk.run_server"| wrap
     main -->|"导入全部 tools 后 run_server(mcp)"| wrap["包装后的 run_server"]
-    wrap -->|"progressive"| apply["apply_progressive(mcp)：工具移入 ToolCatalog，注册 4 网关"]
+    wrap --> apply["apply_progressive(mcp)：工具移入 ToolCatalog，注册 4 网关"]
     wrap --> run["上游原 run_server"]
 ```
 
-- 上游文件中**唯一**的改动：`python/fxhoudinimcp/__main__.py` 的 `main()` 开头插入 3 行带 `# fork:progressive` 标记的 hook（由 `sync.py` 自动维护）。`install_hook` 带兜底：若 fork 代码因上游变化无法导入，`full` 模式照常启动上游，只有显式请求 `progressive` 才以退出码 2 报错——fork 坏了也不会拖垮上游 CLI。
+- 上游文件中**唯一**的改动：`python/fxhoudinimcp/__main__.py` 的 `main()` 开头插入 3 行带 `# fork:progressive` 标记的 hook（由 `sync.py` 自动维护）。`install_hook` 带兜底：若 fork 代码因上游变化无法导入，`install`/`--help` 等子命令照常可用，但启动 server 会以退出码 2 明确报错，绝不悄悄退化成全量工具。
 - `server.py` / `_sdk.py` / `config.py` 与上游完全一致。网关复用上游注册好的**同一个 SDK Tool 对象**（已带 compact JSON 与严格参数校验），不复制任何上游逻辑。
 - 所有对上游 API 和 MCP SDK 私有属性的依赖集中在 [`_fork/upstream_api.py`](../python/fxhoudinimcp/_fork/upstream_api.py)：上游/SDK 改名时只坏这一个文件。
 - 测试 [`tests/test_fork_progressive.py`](../tests/test_fork_progressive.py) 不硬编码任何具体上游工具名，全部从上游当前注册的工具动态推导。

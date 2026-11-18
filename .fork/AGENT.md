@@ -8,7 +8,7 @@ improvise.
 
 ## 0. What the fork is (read once)
 
-The fork adds one feature, a "progressive disclosure" mode: 4 gateway tools
+The fork adds one feature: its server is **progressive-only**, with 4 gateway tools
 instead of 200+. It is built so that it **never edits upstream code**:
 
 | Path | Owner | Rule |
@@ -91,7 +91,7 @@ matches the error message:
 | `test_categories_are_upstream_tool_modules` | Upstream changed how tool modules are laid out | Adjust `tool_category()` in `_fork/upstream_api.py`. |
 | `test_catalog_mirrors_full_surface_exactly` with `additionalProperties` | Upstream stopped forcing strict tool schemas | Report it (go to **4**). Don't work around it. |
 | `Upstream now registers tools named like the gateway` | Name clash with `houdini_discover/schema/call/batch` | Go to **4**. |
-| `test_hook_*`, `test_cli_*`, `test_env_var_*`, `test_full_mode_is_untouched` | Upstream changed `main()` or how it starts the server | Run `PY .fork/sync.py restore-hook`, commit, then verify again. If it still fails, see whether upstream still calls `run_server` from `fxhoudinimcp._sdk` inside `main()` (`git diff HEAD~1 -- python/fxhoudinimcp/__main__.py`). If it doesn't, go to **4**. |
+| `test_hook_*`, `test_plain_start_*`, `test_legacy_*`, `test_other_*` | Upstream changed `main()` or how it starts the server | Run `PY .fork/sync.py restore-hook`, commit, then verify again. If it still fails, see whether upstream still calls `run_server` from `fxhoudinimcp._sdk` inside `main()` (`git diff HEAD~1 -- python/fxhoudinimcp/__main__.py`). If it doesn't, go to **4**. |
 | a test that names a specific value that changed upstream (a count, a summary text) | The test was too specific | Make the test compute that value dynamically. Never weaken a test until it asserts nothing. |
 
 ### 3d. `TESTS FAILED`: lines tagged `[upstream test]`

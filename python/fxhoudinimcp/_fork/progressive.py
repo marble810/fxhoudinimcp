@@ -1,24 +1,22 @@
-"""Progressive-disclosure exposure mode: four gateway tools instead of 200+.
+"""Progressive disclosure: the fork's server exposes four gateway tools, always.
 
-In ``progressive`` mode the server advertises only ``houdini_discover``,
+This fork is progressive-only. The server advertises just ``houdini_discover``,
 ``houdini_schema``, ``houdini_call`` and ``houdini_batch``. Every upstream tool
 stays registered in a private :class:`~fxhoudinimcp._fork.catalog.ToolCatalog`
-and runs through the exact same SDK ``Tool`` object full mode would use.
+and runs through the exact SDK ``Tool`` object upstream registered. Anyone who
+wants the full 200+ tool surface installs upstream fxhoudinimcp instead.
 
 How it attaches to upstream, without editing upstream code beyond one hook:
 
 1. ``fxhoudinimcp.__main__.main`` starts with lines marked
    ``# fork:progressive`` that call ``fxhoudinimcp._fork.install_hook``, which
-   calls :func:`install` (or, if this module cannot import, keeps upstream's
-   full mode running).
-2. :func:`install` strips ``--exposure MODE`` / ``--exposure=MODE`` from
-   ``sys.argv`` (so upstream's argument handling never sees it), records the
-   mode in ``FXHOUDINIMCP_EXPOSURE``, and wraps ``fxhoudinimcp._sdk.run_server``.
+   calls :func:`install`.
+2. :func:`install` strips the legacy ``--exposure progressive`` flag from
+   ``sys.argv`` (so old client configs keep working and upstream's argument
+   handling never sees it), and wraps ``fxhoudinimcp._sdk.run_server``.
 3. When upstream calls ``run_server(mcp, ...)`` -- after every tool, prompt and
-   resource is registered -- the wrapper calls :func:`apply_progressive` if the
-   mode is ``progressive``, then starts the server unchanged.
-
-``full`` (the default) leaves upstream behaviour byte-for-byte untouched.
+   resource is registered -- the wrapper calls :func:`apply_progressive`, then
+   starts the server unchanged.
 """
 
 from __future__ import annotations
@@ -44,42 +42,38 @@ from fxhoudinimcp._fork.upstream_api import (
     tool_registry,
 )
 
-EXPOSURE_ENV = "FXHOUDINIMCP_EXPOSURE"
-EXPOSURE_MODES = ("full", "progressive")
+LEGACY_EXPOSURE_ENV = "FXHOUDINIMCP_EXPOSURE"
 GATEWAY_TOOL_NAMES = ("houdini_discover", "houdini_schema", "houdini_call", "houdini_batch")
 HOOK_MARKER = "# fork:progressive"
 
 _PREAMBLE_PATH = Path(__file__).with_name("preamble.md")
 _STATE_ATTR = "_fork_progressive_state"
 _WRAPPED_FLAG = "_fork_progressive_wrapped"
+_FULL_HINT = (
+    "This fork only serves the progressive gateway; for the full tool set "
+    "install upstream instead: pip install fxhoudinimcp"
+)
 
 
-# -- exposure mode ---------------------------------------------------------
+# -- legacy exposure flag ------------------------------------------------------
 
 
-def resolve_mode(raw: str | None, *, source: str = EXPOSURE_ENV) -> str:
-    """Normalise an exposure-mode string; empty or ``None`` means ``full``."""
+def check_legacy_mode(raw: str | None, *, source: str) -> None:
+    """Accept an old ``progressive`` / empty setting; refuse anything else."""
     value = (raw or "").strip().lower()
-    if not value:
-        return "full"
-    if value not in EXPOSURE_MODES:
-        expected = ", ".join(EXPOSURE_MODES)
-        raise ValueError(f"Invalid {source} {raw!r}; expected one of: {expected}.")
-    return value
+    if value in ("", "progressive"):
+        return
+    if value == "full":
+        raise ValueError(f"{source}=full is not supported. {_FULL_HINT}")
+    raise ValueError(f"Invalid {source} {raw!r}; this fork is progressive-only.")
 
 
-def exposure_mode() -> str:
-    """The exposure mode selected by ``FXHOUDINIMCP_EXPOSURE`` (default ``full``)."""
-    return resolve_mode(os.getenv(EXPOSURE_ENV))
+def consume_cli_args(args: list[str]) -> list[str]:
+    """*args* without the legacy ``--exposure progressive`` flag.
 
-
-def consume_cli_args(args: list[str]) -> tuple[list[str], str | None]:
-    """Split ``--exposure`` out of *args*; returns ``(remaining_args, mode_or_None)``.
-
-    Raises ``ValueError`` for a missing or invalid value.
+    Raises ``ValueError`` for a missing value or any mode but ``progressive``.
     """
     remaining: list[str] = []
-    mode: str | None = None
     index = 0
     while index < len(args):
         arg = args[index]
@@ -94,9 +88,9 @@ def consume_cli_args(args: list[str]) -> tuple[list[str], str | None]:
             index += 1
             continue
         if not value.strip() or value.startswith("-"):
-            raise ValueError("missing value for --exposure (expected 'full' or 'progressive')")
-        mode = resolve_mode(value, source="--exposure value")
-    return remaining, mode
+            raise ValueError("missing value for --exposure (only 'progressive' is accepted)")
+        check_legacy_mode(value, source="--exposure")
+    return remaining
 
 
 # -- CLI hook --------------------------------------------------------------
@@ -105,19 +99,17 @@ def consume_cli_args(args: list[str]) -> tuple[list[str], str | None]:
 def install(argv: list[str] | None = None) -> None:
     """Entry-point hook, called first thing in upstream ``main()``.
 
-    Mutates *argv* (default ``sys.argv``) in place to drop ``--exposure``,
-    exports the chosen mode to ``FXHOUDINIMCP_EXPOSURE`` and makes
-    ``fxhoudinimcp._sdk.run_server`` apply it. Exits 2 on a bad flag.
+    Mutates *argv* (default ``sys.argv``) in place to drop the legacy
+    ``--exposure`` flag and makes ``fxhoudinimcp._sdk.run_server`` expose the
+    gateway. Exits 2 on a request for any other mode.
     """
     argv = sys.argv if argv is None else argv
     try:
-        remaining, mode = consume_cli_args(list(argv[1:]))
+        remaining = consume_cli_args(list(argv[1:]))
     except ValueError as exc:
         print(f"{exc}\n", file=sys.stderr)
         raise SystemExit(2) from exc
     argv[1:] = remaining
-    if mode is not None:
-        os.environ[EXPOSURE_ENV] = mode
     _wrap_run_server()
 
 
@@ -129,13 +121,18 @@ def _wrap_run_server() -> None:
     @functools.wraps(original)
     def run_server(server, *args, **kwargs):
         try:
-            mode = exposure_mode()
+            check_legacy_mode(os.getenv(LEGACY_EXPOSURE_ENV), source=LEGACY_EXPOSURE_ENV)
         except ValueError as exc:
             print(f"{exc}\n", file=sys.stderr)
             raise SystemExit(2) from exc
-        if mode == "progressive":
-            apply_progressive(server)
-        return original(server, *args, **kwargs)
+        apply_progressive(server)
+        try:
+            return original(server, *args, **kwargs)
+        finally:
+            # run_server blocks for the life of the process, so this only
+            # matters when it returns early (tests patch server.run): the
+            # shared module-level server must not stay mutated afterwards.
+            restore_full(server)
 
     setattr(run_server, _WRAPPED_FLAG, True)
     sdk_module.run_server = run_server
@@ -152,7 +149,7 @@ class _State:
 
 
 def current_catalog(server: Any) -> ToolCatalog | None:
-    """The catalog behind *server*'s gateway, or ``None`` in full mode."""
+    """The catalog behind *server*'s gateway, or ``None`` before it is applied."""
     state = getattr(server, _STATE_ATTR, None)
     return state.catalog if state is not None else None
 
@@ -301,17 +298,15 @@ def register_gateway_tools(server: Any, catalog: ToolCatalog) -> None:
 
 
 __all__ = [
-    "EXPOSURE_ENV",
-    "EXPOSURE_MODES",
     "GATEWAY_TOOL_NAMES",
     "HOOK_MARKER",
+    "LEGACY_EXPOSURE_ENV",
     "apply_progressive",
     "build_instructions",
+    "check_legacy_mode",
     "consume_cli_args",
     "current_catalog",
-    "exposure_mode",
     "install",
     "register_gateway_tools",
-    "resolve_mode",
     "restore_full",
 ]
