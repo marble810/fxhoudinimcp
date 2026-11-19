@@ -1394,6 +1394,15 @@ def _link_multiparm(src: hou.Parm, dst: hou.Parm, rel_node: str) -> dict[str, An
         raise ValueError(
             f"The entries of {dst.path()} and {src.path()} do not line up: {mine} / {theirs}."
         )
+    # opmultiparm puts one number in both '#': entry 0 would read the source's
+    # entry 0, which a multiparm counted from 1 does not have.
+    first_dst, first_src = _first_index(dst), _first_index(src)
+    if first_dst != first_src:
+        raise ValueError(
+            f"{dst.path()} numbers its entries from {first_dst} and {src.path()} from "
+            f"{first_src} (multistartoffset): opmultiparm links entry N to entry N, so the "
+            "entries cannot follow the source. Link the entries one by one instead."
+        )
     # Paired in order: a folder multiparm's entries may be named differently.
     pairs = [(m, f"{rel_node}/{t}" if rel_node else t) for m, t in zip(mine, theirs, strict=True)]
     dst.deleteAllKeyframes()
@@ -1885,11 +1894,15 @@ def _off_default(parm: hou.Parm) -> bool:
 
 
 def _valueless(parm: hou.Parm) -> bool:
-    """Whether *parm* is a button, a folder or another parm with no value to report."""
-    from fxhoudinimcp_server.handlers.node_handlers import _VALUELESS_PARM_TYPES
+    """Whether *parm* is a button, a tab folder or another parm with no value to report.
+
+    A radio folder and a multiparm count are values: an Add SOP switched to
+    By Group, left out of non_default_only, was rebuilt By Pattern.
+    """
+    from fxhoudinimcp_server.handlers.node_handlers import _is_valueless
 
     try:
-        return parm.parmTemplate().type().name() in _VALUELESS_PARM_TYPES
+        return _is_valueless(parm.parmTemplate())
     except Exception:
         return False
 
@@ -2103,8 +2116,6 @@ def _sweep_parameters(
     value_contains: str | None = None,
 ) -> dict[str, Any]:
     """get_parameters over the nodes of a network, as one table of rows."""
-    from fxhoudinimcp_server.handlers.node_handlers import _VALUELESS_PARM_TYPES
-
     parent = hou.node(inside)
     if parent is None:
         raise hou.OperationFailed(f"Node not found: {inside}")
@@ -2157,10 +2168,9 @@ def _sweep_parameters(
         scanned += 1
         hit = False
         for parm in node.parms():
-            # A button or a folder matched by label has no value to report.
-            with contextlib.suppress(Exception):
-                if parm.parmTemplate().type().name() in _VALUELESS_PARM_TYPES:
-                    continue
+            # A button or a tab folder matched by label has no value to report.
+            if _valueless(parm):
+                continue
             folds = non_default_only and needle is None
             if not _matches_patterns(parm, lowered) and not (
                 folds and _ramp_named_by_key(parm, lowered)
